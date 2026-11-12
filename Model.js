@@ -27,6 +27,24 @@ function cpuPercent(prev, curr) {
   return Math.round(100 * (1 - idleDelta / totalDelta))
 }
 
+// "<idle residency ms> <wall clock ns>" as printed by the GPU section of the
+// sample script. Empty when no Intel GPU idle counter exists.
+function parseGpuSample(text) {
+  var m = /^\s*(\d+)\s+(\d+)\s*$/m.exec(String(text || ""))
+  if (!m) return null
+  return { idleMs: parseInt(m[1], 10), timeMs: parseInt(m[2], 10) / 1e6 }
+}
+
+// GPU busy percent between two samples: the share of wall time the GPU was
+// NOT in its idle (RC6) state. Null until a second sample exists.
+function gpuPercent(prev, curr) {
+  if (!prev || !curr) return null
+  var dt = curr.timeMs - prev.timeMs
+  var idle = curr.idleMs - prev.idleMs
+  if (dt <= 0 || idle < 0) return null
+  return Math.round(100 * (1 - Math.min(1, idle / dt)))
+}
+
 // MemAvailable (not MemFree) is the kernel's own estimate of what's usable
 // without swapping, so it already accounts for reclaimable cache/buffers.
 function parseMem(text) {
@@ -131,6 +149,8 @@ if (typeof module !== "undefined") {
   module.exports = {
     parseCpuLine: parseCpuLine,
     cpuPercent: cpuPercent,
+    parseGpuSample: parseGpuSample,
+    gpuPercent: gpuPercent,
     parseMem: parseMem,
     parseNetDev: parseNetDev,
     netRate: netRate,

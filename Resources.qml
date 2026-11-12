@@ -19,31 +19,34 @@ Panel {
 
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
+  // The theme has no "warning" color, so the middle tier is a fixed amber.
+  readonly property color warning: "#e5c07b"
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property var settingDefaults: ({
     showPercent: true, accentFill: true,
-    trackCpu: true, trackMem: true, trackDisk: true, trackTemp: true, trackNet: false
+    trackCpu: true, trackGpu: true, trackMem: true, trackDisk: true, trackTemp: true, trackNet: false
   })
   readonly property var displayOptionRows: [
-    { key: "showPercent", label: "Show percentage", description: "Show the exact % next to the CPU, memory, and disk icons." },
+    { key: "showPercent", label: "Show percentage", description: "Show the exact % next to the CPU, GPU, memory, and disk icons." },
     { key: "accentFill", label: "Use accent color", description: "Color the filled portion of each icon with your theme's accent color instead of a plain highlight." }
   ]
 
   readonly property bool showPercent: setting("showPercent", settingDefaults.showPercent)
   readonly property bool accentFill: setting("accentFill", settingDefaults.accentFill)
   readonly property bool trackCpu: setting("trackCpu", settingDefaults.trackCpu)
+  readonly property bool trackGpu: setting("trackGpu", settingDefaults.trackGpu)
   readonly property bool trackMem: setting("trackMem", settingDefaults.trackMem)
   readonly property bool trackDisk: setting("trackDisk", settingDefaults.trackDisk)
   readonly property bool trackTemp: setting("trackTemp", settingDefaults.trackTemp)
   readonly property bool trackNet: setting("trackNet", settingDefaults.trackNet)
-  readonly property bool anyTracked: trackCpu || trackMem || trackDisk || trackTemp || trackNet
+  readonly property bool anyTracked: trackCpu || trackGpu || trackMem || trackDisk || trackTemp || trackNet
 
   // Bar display order, user-configurable via the settings panel's ▲▼
   // buttons. Sanitized against known keys so a stale/hand-edited setting
   // (or a future new metric not yet in someone's saved order) never hides
   // or duplicates an entry.
-  readonly property var defaultOrder: ["cpu", "mem", "disk", "temp", "net"]
+  readonly property var defaultOrder: ["cpu", "gpu", "mem", "disk", "temp", "net"]
   readonly property var order: {
     var raw = setting("order", root.defaultOrder)
     if (!Array.isArray(raw)) return root.defaultOrder
@@ -67,12 +70,14 @@ Panel {
   property bool cursorActive: false
 
   property var prevCpuSample: null
+  property var prevGpuSample: null
   property var prevNetSample: null
   property real prevNetSampleTime: 0
   property string tempSensorPath: ""
   property bool tempSensorResolved: false
 
   property int cpuPct: -1
+  property int gpuPct: -1
   property int memPct: -1
   property real memTotalBytes: 0
   property real memUsedBytes: 0
@@ -93,8 +98,16 @@ Panel {
   // /sys/class/hwmon each tick.
   function rebuildSampleCommand() {
     var tempCat = root.tempSensorPath !== "" ? ("cat " + Util.shellQuote(root.tempSensorPath) + " 2>/dev/null") : "true"
+    // Intel GPUs expose no unprivileged "busy %" counter, but both drivers
+    // publish how long the GPU sat in its idle (RC6) power state, so busy =
+    // 1 - idle time / wall time. i915 and xe keep that counter in different
+    // places; the first one found wins. Wall time is sampled alongside it.
+    var gpuCat = "r=$(cat /sys/class/drm/card*/gt/gt0/rc6_residency_ms " +
+      "/sys/class/drm/card*/device/tile0/gt0/gtidle/idle_residency_ms 2>/dev/null | head -n1); " +
+      "[ -n \"$r\" ] && echo \"$r $(date +%s%N)\""
     var script = [
       "echo ===STAT===", "cat /proc/stat",
+      "echo ===GPU===", gpuCat,
       "echo ===MEM===", "cat /proc/meminfo",
       "echo ===NET===", "cat /proc/net/dev",
       "echo ===TEMP===", tempCat,
@@ -112,6 +125,13 @@ Panel {
       var pct = Model.cpuPercent(root.prevCpuSample, cpu)
       if (pct !== null) root.cpuPct = Math.max(0, Math.min(100, pct))
       root.prevCpuSample = cpu
+    }
+
+    var gpu = Model.parseGpuSample(s.GPU || "")
+    if (gpu) {
+      var gpct = Model.gpuPercent(root.prevGpuSample, gpu)
+      if (gpct !== null) root.gpuPct = Math.max(0, Math.min(100, gpct))
+      root.prevGpuSample = gpu
     }
 
     var mem = Model.parseMem(s.MEM || "")
@@ -199,6 +219,7 @@ Panel {
   //      so both always agree on label/value/fill/urgency for a given key.
   function metricLabel(key) {
     if (key === "cpu") return "CPU usage"
+    if (key === "gpu") return "GPU usage"
     if (key === "mem") return "Memory usage"
     if (key === "disk") return "Disk space"
     if (key === "temp") return "CPU temperature"
@@ -208,6 +229,7 @@ Panel {
 
   function metricTracked(key) {
     if (key === "cpu") return root.trackCpu
+    if (key === "gpu") return root.trackGpu
     if (key === "mem") return root.trackMem
     if (key === "disk") return root.trackDisk
     if (key === "temp") return root.trackTemp
@@ -217,14 +239,30 @@ Panel {
 
   function metricGlyph(key) {
     if (key === "cpu") return ""    // GLYPH:cpu
+    if (key === "gpu") return "\uF108"   // GLYPH:gpu (nf-fa-desktop, U+F108)
     if (key === "mem") return ""    // GLYPH:mem
     if (key === "disk") return ""   // GLYPH:disk
     if (key === "temp") return ""   // GLYPH:temp
     return ""
   }
 
+  // Where each glyph's body sits inside its full ink bounds, as fractions of
+  // the ink height measured from the top. Pins (chip), stands (monitor) and
+  // rounded caps stick out past the body, so filling against the full ink
+  // height makes 0% and 100% look wrong. Values measured from the glyphs in
+  // JetBrainsMono Nerd Font; adjust here if a different font shifts them.
+  function metricBody(key) {
+    if (key === "cpu") return { top: 0.135, bottom: 0.865 }
+    if (key === "gpu") return { top: 0.0, bottom: 0.813 }
+    if (key === "mem") return { top: 0.0, bottom: 1.0 }
+    if (key === "disk") return { top: 0.032, bottom: 0.968 }
+    if (key === "temp") return { top: 0.016, bottom: 0.986 }
+    return { top: 0.0, bottom: 1.0 }
+  }
+
   function metricFraction(key) {
     if (key === "cpu") return root.cpuPct / 100
+    if (key === "gpu") return root.gpuPct / 100
     if (key === "mem") return root.memPct / 100
     if (key === "disk") return root.diskPct / 100
     if (key === "temp") return root.tempC !== null ? (root.tempC - root.tempFloor) / (root.tempCeiling - root.tempFloor) : 0
@@ -233,14 +271,31 @@ Panel {
 
   function metricUrgent(key) {
     if (key === "cpu") return root.cpuPct >= 90
+    if (key === "gpu") return root.gpuPct >= 90
     if (key === "mem") return root.memPct >= 90
     if (key === "disk") return root.diskPct >= 90
     if (key === "temp") return root.tempC !== null && root.tempC >= 85
     return false
   }
 
+  // Warning tier only applies to CPU, GPU, and temperature; memory and disk
+  // go straight from normal to urgent.
+  function metricWarning(key) {
+    if (key === "cpu") return root.cpuPct >= 50
+    if (key === "gpu") return root.gpuPct >= 21
+    if (key === "temp") return root.tempC !== null && root.tempC >= 60
+    return false
+  }
+
+  function metricFillColor(key) {
+    if (root.metricUrgent(key)) return root.urgent
+    if (root.metricWarning(key)) return root.warning
+    return root.accentFill ? Color.accent : root.foreground
+  }
+
   function metricValueText(key) {
     if (key === "cpu") return root.cpuPct >= 0 ? (root.cpuPct + "%") : "…"
+    if (key === "gpu") return root.gpuPct >= 0 ? (root.gpuPct + "%") : "…"
     if (key === "mem") return root.memPct >= 0 ? (root.memPct + "%") : "…"
     if (key === "disk") return root.diskPct >= 0 ? (root.diskPct + "%") : "…"
     if (key === "temp") return root.tempText()
@@ -252,6 +307,7 @@ Panel {
   // enable it — instead of a separate summary line elsewhere in the panel.
   function metricSummary(key) {
     if (key === "cpu") return root.cpuPct >= 0 ? ("Currently " + root.cpuPct + "%") : "Reading…"
+    if (key === "gpu") return root.gpuPct >= 0 ? ("Currently " + root.gpuPct + "%") : "Reading…"
     if (key === "mem") return root.memPct >= 0
       ? ("Currently " + root.memPct + "% (" + Model.formatBytes(root.memUsedBytes) + " / " + Model.formatBytes(root.memTotalBytes) + ")")
       : "Reading…"
@@ -378,11 +434,11 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             glyph: root.metricGlyph(metricSlot.modelData)
             fraction: root.metricFraction(metricSlot.modelData)
+            bodyTop: root.metricBody(metricSlot.modelData).top
+            bodyBottom: root.metricBody(metricSlot.modelData).bottom
             pixelSize: Style.font.body
             fontFamily: root.fontFamily
-            fillColor: root.metricUrgent(metricSlot.modelData)
-              ? root.urgent
-              : (root.accentFill ? Color.accent : root.foreground)
+            fillColor: root.metricFillColor(metricSlot.modelData)
           }
           Text {
             visible: metricSlot.modelData !== "net" && (metricSlot.modelData === "temp" || root.showPercent)
@@ -640,6 +696,10 @@ Panel {
     id: fillRoot
     property string glyph: ""
     property real fraction: 0
+    // Body extent as fractions of the ink height (0 = top, 1 = bottom); the
+    // fill runs from bodyBottom (empty) up to bodyTop (full).
+    property real bodyTop: 0
+    property real bodyBottom: 1
     property color fillColor: Color.foreground
     property color emptyColor: fillColor
     property real emptyOpacity: 0.28
@@ -659,6 +719,8 @@ Panel {
     readonly property real inkTop: emptyGlyph.baselineOffset + ink.tightBoundingRect.y
     readonly property real inkHeight: Math.max(1, ink.tightBoundingRect.height)
     readonly property real inkBottom: inkTop + inkHeight
+    readonly property real bodyTopY: inkTop + inkHeight * bodyTop
+    readonly property real bodyBottomY: inkTop + inkHeight * bodyBottom
 
     Text {
       id: emptyGlyph
@@ -676,8 +738,8 @@ Panel {
       x: 0
       width: fillRoot.width
       clip: true
-      y: fillRoot.inkBottom - fillRoot.inkHeight * Math.max(0, Math.min(1, fillRoot.fraction))
-      height: fillRoot.inkBottom - y
+      y: fillRoot.bodyBottomY - (fillRoot.bodyBottomY - fillRoot.bodyTopY) * Math.max(0, Math.min(1, fillRoot.fraction))
+      height: fillRoot.bodyBottomY - y
 
       Text {
         x: 0

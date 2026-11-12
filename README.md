@@ -1,6 +1,6 @@
 # Resources
 
-A bar widget for [Omarchy](https://omarchy.org/) that shows live CPU, memory,
+A bar widget for [Omarchy](https://omarchy.org/) that shows live CPU, Intel GPU, memory,
 disk, temperature, and network usage — each as an icon that fills up with
 usage, the same way the built-in wifi and battery icons do. Click it for a
 settings panel: what to track, in what order, and whether the exact numbers
@@ -43,6 +43,7 @@ along with it — nothing else on your system is touched.
 | Metric | Source | Notes |
 |---|---|---|
 | CPU | `/proc/stat` | Delta between two samples, like `top` |
+| GPU (Intel) | `rc6_residency_ms` (i915) / `idle_residency_ms` (xe) | Share of time the GPU was not idle between two samples |
 | Memory | `/proc/meminfo` | Uses `MemAvailable`, not `MemFree` — already accounts for reclaimable cache |
 | Disk | `df` on `/` | Your root filesystem's used space |
 | Temperature | `/sys/class/hwmon` | Auto-detects `coretemp` (Intel), `k10temp`/`zenpower` (AMD) — whichever exists |
